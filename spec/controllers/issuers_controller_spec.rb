@@ -9,8 +9,8 @@ DatabaseCleaner.strategy = :truncation
 CREATE_ISSUER_TIMEOUT = 10 # To test created_at
 VALID_AWS_KEY = 'AKIAIOSFODNN7EXAMPLE'
 VALID_AWS_SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
-CHANGED_VALID_AWS_KEY = FAKE
-CHANGED_VALID_AWS_SECRET = FAKE
+CHANGED_VALID_AWS_KEY = 'FAKEAKIAIOSFODNN7CHANGED'
+CHANGED_VALID_AWS_SECRET = 'FAKEwJalrXUtnFEMI/K7MDENG/bPxRfiCYTGNCHANGED'
 SENSITIVE_DATA_MASK = "*****"
 
 describe IssuersController, type: :request do
@@ -239,8 +239,8 @@ describe IssuersController, type: :request do
         payload_update_issuer = <<~BODY
           {
             "data": {
-              "access_key_id": FAKE
-              "secret_access_key": FAKE
+              "access_key_id": "FAKEAKIAIOSFODNN7CHANGED",
+              "secret_access_key": "FAKEwJalrXUtnFEMI/K7MDENG/bPxRfiCYTGNCHANGED"
             }
           }
         BODY
