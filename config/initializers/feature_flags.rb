@@ -1,3 +1,7 @@
+# frozen_string_literal: true
+
+require Rails.root.join('lib/conjur/feature_flags')
+
 Rails.application.configure do
   # Loads Feature Flag configuration.
   #
@@ -27,7 +31,14 @@ Rails.application.configure do
     # If enabled, the Roles API will emit callbacks to extensions for
     # before/after events when role memberships are added or removed
     # through the REST API.
-    roles_api_extensions: false
+    roles_api_extensions: false,
+
+    # When enabled, the Issuers API is available to create and manage
+    # dynamic secret issuers. Thi also enables retrieval of dynamic secrets
+    # through the secret GET API. This requires an available ephemeral secrets
+    # service configured with the `EPHEMERAL_SECRETS_SERVICE_*` environment
+    # variables.
+    dynamic_secrets: false
   }.freeze
 
   config.feature_flags = Conjur::FeatureFlags::Features.new(

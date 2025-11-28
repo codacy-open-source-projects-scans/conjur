@@ -9,27 +9,155 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Nothing should go in this section, please add to the latest unreleased version
   (and update the corresponding date), or add a new version.
 
+## [1.24.0] - 2025-11-10
+
+### Changed
+- Updated documentation to align with Conjur Enterprise name change to Secrets Manager. (CNJR-10965)
+
+### Security
+- Upgrade Rails to v7 (CNJR-11466)
+- Bumped rack to 2.2.19 to resolve CVE-2025-61770, CVE-2025-61771, CVE-2025-61772, CVE-2025-61919. CONJSE-2064, CONJSE-2065
+- Remove the policy factory API endpoints from the config/routes.rb file to prevent
+  anyone being able to call these endpoints and trigger the marshal.load call. CONJSE-2038
+- Fix unsafe shell command executions. CONJSE-2039. CONJSE-2041-2046.
+- Remove vulnerable activestorage gem from the dependencies to address CVE-2025-24293. CONJSE-2050
+- Bump rexml gem to 3.4.2 to resolve CVE-2025-58767. CONJSE-2056
+- Remove the policy factory code. CONJSE-2047
+- Bump rack gem to 2.2.18 to resolve CVE-2025-59830. CONJSE-2058
+
+### Added
+- Added endpoint to retrieve last API key rotation timestamp. CNJR-11385
+- Added timestamp of the last API key rotation. CNJR-11384
+- Added extra context (policy ID and offending lines) for API error responses caused by policy updates. CNJR-2571
+- Added the list authenticators endpoint for the V2 API's. CNJR-9137
+- Added the show authenticator endpoint for the V2 API's. CNJR-9133
+- Added the ability to create authenticators through a V2 API endpoint CNJR-9136
+- Added the enable authenticator endpoint for the V2 API's. CNJR-9135
+- Dynamic secrets are now supported in the batch secret retrieval API. CNJR-9172
+- Added the delete authenticators endpoint for the V2 API's. CNJR-9134
+- Added warning for annotation keys matching known policy attribute names. CNJR-9836
+
+### Changed
+- Changed `count` field in authenticators V2 batch retrieval endpoint to
+  reflect the total count of objects in the DB rather than in the response.
+  CNJR-9525
+
+### Fixed
+- Attempt to load a policy that references a non-existent resource now
+  results in a `422` response, rather than a `404` error. CNJR-9122
+- Log a warning when Kubernetes authenticator certificate injection process log
+  directory is not writable. CNJR-7070
+- Added Content-Length header in for failure HTTP responses in which
+  it was missing. CNJR-10332
+- Write operations for issuers now return HTTP 405 instead of HTP 500. CNJR-10457
+- The inject client cert endpoint no longer caches enabled authenticators. CNJR-9540
+- Added support for reading resources with "configuration" kind. CNJR-10546
+
+## [1.22.2] - 2025-07-23
+
+### Added
+- Allow conjur administrator to enable additional signed headers for IAM authenticator. CNJR-10217
+
+## [1.22.1] - 2025-07-15
+
+### Security
+- Improve headers handling in AWS IAM authenticator. CONJSE-2023
+- Remove support for !include policy syntax in the policy parser. CONJSE-2019
+- Block ability to create hosts in conjur branch in hosts factories. CONJSE-2015
+- Add kind validation to all APIs. CONJSE-2018
+- Improves host factory token validation to prevent creation without proper kind and id, and
+  secret validation to prevent creation unless it is of variable kind. CONJSE-2011
+- Update simpleidn to 0.2.3. CNJR-9498
+- Update rack to 2.2.14 to address CVE-2025-46727. CONJSE-2001
+- Upgrade net-imap to 0.5.8 or later to address CVE-2025-43857. CONJSE-2005
+- Improve AWS IAM STS region validation to prevent using a region that is not supported. CONJSE-2008
+- Bump nokogiri gem to resolve GHSA-353f-x4gh-cqq8. CONJSE-2031
+
+## [1.22.0] - 2025-04-02
+
+### Added
+- Added the dynamic secrets Issuers API and data model. CNJR-7828
+- Added support for retrieving dynamic secrets through a configured
+  ephemeral secrets engine. CNJR-7829
+
+### Fixed
+- Attempt to authenticate using the built-in authenticator (`authn`) with a GET
+  request now results in a `404` response, rather than logging an authenticator
+  not enabled message. CNJR-5854
+- Set the default and maximal limit value for resources list API to 1000 in order
+  to align with the documentation. CNJR-8485
+- Ensure Kubernetes authenticator websocket connections are closed when a
+  Kubernetes API error occurs. CNJR-8687
+- Leading or trailing newline characters in the Conjur authorization token are
+  now removed before parsing the token. CNJR-3439
+
+### Changed
+- Do not increase secret's value version in case there is no actual change in
+  the secret's value. CNJR-7680
+- Use both database and environment configuration for the enabled authenticators.
+  CNJR-8724
+- Update rack to 2.2.13 to address CVE-2025-27610.
+  CONJSE-1956
+- Update nokogiri to 1.18.4 to address GHSA-mrxw-mxhj-p664.
+  CONJSE-1959
+- Update URI to 1.0.3 to address CVE-2025-27221.
+  CONJSE-1952
+
+## [1.21.3] - 2024-12-16
+
+### Fixed
+- Fixed an error when restoring a backup from an old version of Conjur that
+  contained orphaned roles (CNJR-7321)
+
+### Changed
+- Redact sensitive information in the dryrun REST API response
+  (Roles and Resources not visible to the authenticated user). CNJR-6547
+
+### Security
+- Authn-JWT: Deny access when issuer claim is missing from JWT.
+  Can be disabled using the authn_jwt_ignore_missing_issuer_claim config flag.
+  (CONJSE-1920)
+- Update nokogiri to 1.16.5 to address CVE-2024-34459.
+  CONJSE-1923
+- Update puma to 6.4.3 to address CVE-2024-45614.
+  CONJSE-1923
+- Update openid_connect to 2.3.1 to address CVE-2023-51774 in json-jwt.
+  CONJSE-1923
+- Update rails to 6.1.7.10 to resolve: rails-html-sanitizer to resolve
+  CVE-2024-53986, CVE-2024-53987, and CVE-2024-53988, and actionpack to resolve
+  CVE-2024-54133.
+  CONJSE-1923
+
+### Added
+- Add JSON support for the `/` endpoint that returns the Conjur version
+  (CNJR-7245)
+
+### Added
+- Adds support for Factory Pipelines
+
 ## [1.21.2] - 2024-11-20
 
 ### Changed
 - Replaces ERB template engine with Mustache when rendering Factory templates
   CNJR-6700
 - Modifies the REST API response of a Policy load command, when called with the
-  `dryRun` parameter, to report policy attributes that would be created by the 
+  `dryRun` parameter, to report policy attributes that would be created by the
   submitted policy.
   CNJR-6999
 - Modifies the REST API response of a Policy load command, when called with the
-  `dryRun` parameter, to report policy attributes that would be updated by the 
+  `dryRun` parameter, to report policy attributes that would be updated by the
   submitted policy.
   CNJR-6109
 - Modifies the REST API response of a Policy load command, when called with the
-  `dryRun` parameter, to report policy attributes that would be deleted by the 
+  `dryRun` parameter, to report policy attributes that would be deleted by the
   submitted policy.
   CNJR-6108
 
 ### Fixed
 - Updates audit events generated during Policy Factory usage.
   CNJR-6891
+- Update audit events on local authn failures and ip restriction fail.
+  CNJR-7074
 
 ### Fixed
 - Updates OIDC Authenticator to use the scope defined in configuration.
@@ -1259,7 +1387,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ### Added
 - The first tagged version.
 
-[Unreleased]: https://github.com/cyberark/conjur/compare/v1.21.2...HEAD
+[Unreleased]: https://github.com/cyberark/conjur/compare/v1.24.0...HEAD
+[1.24.0]: https://github.com/cyberark/conjur/compare/v1.22.2...v1.24.0
+[1.22.2]: https://github.com/cyberark/conjur/compare/v1.22.1...v1.22.2
+[1.22.1]: https://github.com/cyberark/conjur/compare/v1.22.0...v1.22.1
+[1.22.0]: https://github.com/cyberark/conjur/compare/v1.21.3...v1.22.0
+[1.21.3]: https://github.com/cyberark/conjur/compare/v1.21.2...v1.21.3
 [1.21.2]: https://github.com/cyberark/conjur/compare/v1.21.1...v1.21.2
 [1.21.1]: https://github.com/cyberark/conjur/compare/v1.21.0...v1.21.1
 [1.21.0]: https://github.com/cyberark/conjur/compare/v1.20.4...v1.21.0

@@ -8,7 +8,7 @@ require 'anyway_config'
 # errors, we should move those classes into `/lib` from `app/domain`. However,
 # that change greatly expands the scope of this PR and so, instead, I used a
 # relative require to include the log definitions here.
-require_relative '../../app/domain/logs'
+require_relative '../../app/domain/log_messages'
 
 module Conjur
   # We are temporarily avoiding hooking into the application error system
@@ -32,18 +32,27 @@ module Conjur
       # Read TRUSTED_PROXIES before default to maintain backwards compatibility
       trusted_proxies: (ENV['TRUSTED_PROXIES'] || []),
       # The maximum number of results for listing requests. The default value
-      # is 0 and means that there is no limit.
-      api_resource_list_limit_max: 0,
+      # is 1000. Value 0 means that there is no limit.
+      api_resource_list_limit_max: 1000,
       user_authorization_token_ttl: 480, # The default TTL of User is 8 minutes
       host_authorization_token_ttl: 480, # The default TTL of Host is 8 minutes
       authn_api_key_default: true,
       authenticators: [],
       extensions: [],
       telemetry_enabled: false,
-      policy_factories_path: 'conjur/factories',
       effective_policy_max_depth: 64,
-      effective_policy_max_limit: 100000
+      effective_policy_max_limit: 100000,
+      authn_jwt_ignore_missing_issuer_claim: false,
+      # When retrieving secrets in batch, how many dynamic secrets are allowed
+      # in a single request. This is limited because these require additional
+      # network calls and are significantly slower to retrieve.
+      dynamic_secrets_per_request_max: 10,
+      # Host factory operation can be disabled entirely
+      host_factories_enabled: true
     )
+
+    AUTHENTICATORS = %w[authn authn-k8s authn-oidc authn-iam
+        authn-ldap authn-gcp authn-jwt authn-azure].freeze
 
     def initialize(
       *args,
@@ -88,8 +97,10 @@ module Conjur
       invalid = []
 
       invalid << "trusted_proxies" unless trusted_proxies_valid?
-      invalid << "authenticators" unless authenticators_valid?
       invalid << "telemetry_enabled" unless telemetry_enabled_valid?
+      invalid << "authn_jwt_ignore_missing_issuer_claim" unless authn_jwt_ignore_missing_issuer_claim_valid?
+      authenticators_invalid = authenticators_error_messages
+      invalid << "authenticators: #{authenticators_invalid.join('\n')}" unless authenticators_invalid.empty?
 
       unless invalid.empty?
         msg = "Invalid values for configured attributes: #{invalid.join(',')}"
@@ -223,21 +234,31 @@ module Conjur
       false
     end
 
-    def authenticators_valid?
+    def authenticators_error_messages
       # TODO: Ideally we would check against the enabled authenticators
       # in the DB. However, we need to figure out how to use code from the
       # application without introducing warnings.
-      authenticators_regex =
-        %r{^(authn|authn-(k8s|oidc|iam|ldap|gcp|jwt|azure)(/.+)?)$}
-      authenticators.all? do |authenticator|
-        authenticators_regex.match?(authenticator.strip)
-      end
+
+      authen_checker = DidYouMean::SpellChecker.new(dictionary: AUTHENTICATORS)
+
+      authenticators.filter_map { |auth|
+        auth_type, service_id = auth.split("/", 2)
+        suggestion = [authen_checker.correct(auth_type)[0], service_id].join("/")
+        unless AUTHENTICATORS.include?(auth_type.strip)
+          "'#{auth}' is not a valid authenticator type. "\
+          "Did you mean '#{suggestion}'?"
+        end
+        }
     rescue
-      false
+      []
     end
 
     def telemetry_enabled_valid?
       [true, false].include?(telemetry_enabled)
+    end
+
+    def authn_jwt_ignore_missing_issuer_claim_valid?
+      [true, false].include?(authn_jwt_ignore_missing_issuer_claim)
     end
   end
 end

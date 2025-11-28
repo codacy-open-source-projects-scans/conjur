@@ -3,18 +3,23 @@
 require 'spec_helper'
 
 RSpec.describe(Loader::CreatePolicy) do
+  let(:current_user) { Role.find_or_create(role_id: 'rspec:user:admin') }
   # When a Loader is called, a PolicyResult is returned.
   let(:policy_result) { ::PolicyResult }
   let(:policy_version) { nil }
-  let(:logger) { nil }
+  let(:logger) { Rails.logger }
+
+  before(:all) do
+    Slosilo["authn:rspec"] ||= Slosilo::Key.new
+    Role.find_or_create(role_id: 'rspec:user:admin')
+  end
 
   let(:subject) do
     Loader::CreatePolicy.from_policy(
       policy_parse,
       policy_version,
       policy_loader_class,
-      policy_diff: policy_diff,
-      policy_repository: policy_repository,
+      current_user,
       policy_result: policy_result,
       logger: logger
     )
@@ -24,15 +29,64 @@ RSpec.describe(Loader::CreatePolicy) do
     PolicyParse.new([], nil)
   end
 
-  let(:policy_loader) do
-    Loader::DryRun.new(policy_parse: policy_parse, policy_version: policy_version, logger: logger).tap do |loader|
+  let(:mock_records) do
+    {
+      annotations: annotations,
+      credentials: credentials,
+      permissions: permissions,
+      resources: resources,
+      role_memberships: role_memberships,
+      roles: roles
+    }
+  end
+
+  let(:dryrun) do
+    true
+  end
+
+  let(:base) do
+    Loader::Orchestrate.new(
+      dryrun: dryrun,
+      policy_diff: policy_diff,
+      policy_parse: policy_parse,
+      policy_version: policy_version,
+      logger: logger
+    ).tap do |loader|
       # These methods are called during the policy loading procedures.
       allow(loader).to receive(:setup_db_for_new_policy).and_return(nil)
-      allow(loader).to receive(:load_records).and_return(nil)
       allow(loader).to receive(:delete_shadowed_and_duplicate_rows).and_return(nil)
-      allow(loader).to receive(:store_policy_in_db).and_return(nil)
+      allow(loader).to receive(:upsert_policy_records).and_return(nil)
+      allow(loader).to receive(:clean_db).and_return(nil)
       allow(loader).to receive(:release_db_connection).and_return(nil)
 
+      # Diff specific methods
+      allow(loader).to receive(:store_policy_in_db).and_return(credentials)
+      allow(loader).to receive(:store_auxiliary_data).and_return(credentials)
+      allow(loader).to receive(:fetch_created_rows).and_return(mock_records)
+      allow(loader).to receive(:fetch_original_resources).and_return(mock_records)
+      allow(loader).to receive(:dryrun_clean_db).and_return(mock_records)
+      allow(loader).to receive(:filter_unique_records).and_return([])
+      allow(loader).to receive(:create_diff).and_return(policy_diff_response)
+      
+      # These methods are called after a policy load to assert whether a policy
+      # validation error occurred.
+      allow(loader).to receive(:policy_parse).and_return(nil)
+      allow(loader).to receive(:policy_version).and_return(nil)
+
+      # These methods are called when a PolicyResult is initialized with
+      # credential_roles.
+      allow(loader).to receive(:actor_roles).and_return(nil)
+      allow(loader).to receive(:credential_roles).and_return(nil)
+    end
+  end
+
+  let(:policy_loader) do
+    Loader::DryRun.new(
+      policy_parse: policy_parse,
+      policy_version: policy_version,
+      base: base,
+      logger: logger
+    ).tap do |loader|
       # These methods are called after a policy load to assert whether a policy
       # validation error occurred.
       allow(loader).to receive(:policy_parse).and_return(nil)
@@ -129,20 +183,6 @@ RSpec.describe(Loader::CreatePolicy) do
     end
   end
 
-  let(:policy_repository) do
-    DB::Repository::PolicyRepository.new(db: db).tap do |repo|
-      allow(repo).to receive(:find_created_elements)
-        .with(anything)
-        .and_return(diff_response)
-      allow(repo).to receive(:find_deleted_elements)
-        .with(anything)
-        .and_return(diff_response)
-      allow(repo).to receive(:find_original_elements)
-        .with(anything)
-        .and_return(diff_response)
-    end
-  end
-
   let(:diff_response) do
     DB::Repository::DataObjects::DiffElements.new(
       annotations: annotations,
@@ -154,17 +194,17 @@ RSpec.describe(Loader::CreatePolicy) do
     )
   end
 
-  let(:policy_diff_response) do
-    ::SuccessResponse.new({
+  let(:policy_diff_response) do 
+    {
       created: diff_response,
       deleted: diff_response,
       updated: diff_response,
       final: diff_response
-    })
+    }
   end
 
   let(:policy_diff) do
-    CommandHandler::PolicyDiff.new(policy_repository: policy_repository).tap do |mock|
+    CommandHandler::PolicyDiff.new.tap do |mock|
       allow(mock).to receive(:call)
         .and_return(policy_diff_response)
     end
@@ -172,11 +212,8 @@ RSpec.describe(Loader::CreatePolicy) do
 
   describe '.call' do
     context 'when a policy is loaded with dryrun' do
-      context 'when the diff schema name is nil' do
-        before do
-          allow(policy_loader).to receive(:diff_schema_name)
-            .and_return(nil)
-        end
+      context 'when dryrun is false' do
+        let(:dryrun) { false }
         
         it 'there is no diff result' do
           result = subject.call  
@@ -204,7 +241,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff diff result includes annotations' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -253,7 +290,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff result includes credentials' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -302,7 +339,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff result includes permissions' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -351,7 +388,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff result includes resources' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -400,7 +437,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff result includes role memberships' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -449,7 +486,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff result includes roles' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -492,7 +529,7 @@ RSpec.describe(Loader::CreatePolicy) do
           it 'the diff result is full' do
             result = subject.call
 
-            # The PoliyResult is valid
+            # The PolicyResult is valid
             expect(result.nil?).to eq(false)
             expect(result.policy_parse.nil?).to eq(true)
             expect(result.policy_version).to eq(nil)
@@ -541,19 +578,25 @@ RSpec.describe(Loader::CreatePolicy) do
         let(:mock_policy_result_output) do
           double(
             created_roles: %w[role1 role2],
-            diff: diff_response
+            diff: diff_response,
+            visible_resources_before: { some_key: 'some_value' },
+            visible_resources_after: { some_key: 'some_value' }
           )
         end
   
         before do
           allow(mock_policy_result_input).to receive(:created_roles=).and_return(nil)
           allow(mock_policy_result_input).to receive(:diff=).and_return(nil)
+          allow(mock_policy_result_input).to receive(:visible_resources_before=).and_return(nil)
+          allow(mock_policy_result_input).to receive(:visible_resources_after=).and_return(nil)
         end
       
         it 'receives .call and assigns created_roles and diff' do
           expect(subject).to receive(:call).and_return(mock_policy_result_output)
           expect(mock_policy_result_input).to receive(:created_roles=).with(%w[role1 role2])
           expect(mock_policy_result_input).to receive(:diff=).with(diff_response)
+          expect(mock_policy_result_input).to receive(:visible_resources_before=).with(hash_including(:some_key))
+          expect(mock_policy_result_input).to receive(:visible_resources_after=).with(hash_including(:some_key))
       
           subject.call_pr(mock_policy_result_input)
         end
@@ -598,6 +641,9 @@ RSpec.describe(Loader::CreatePolicy) do
 
           before do
             allow(policy_result).to receive(:error).and_return(validation_error)
+            allow(policy_result).to receive(:error).and_return(validation_error)
+            allow(policy_result).to receive(:visible_resources_before).and_return(nil)
+            allow(policy_result).to receive(:visible_resources_after).and_return(nil)
           end
 
           it 'reports successfully' do

@@ -8,15 +8,26 @@ class HostFactoryTokensController < RestController
   before_action :find_token, only: [ :destroy ]
 
   def create
+    raise(ArgumentError, "Invalid resource kind: #{resource.kind}") unless resource.kind == 'host_factory'
+
     authorize(:execute)
 
     (expiration = params.delete(:expiration)) || raise(ArgumentError, "expiration")
-    count = (params.delete(:count) || 1).to_i
+
+    countParam = params.delete(:count) || 1
+    count = if countParam.is_a?(Integer) || countParam.is_a?(String)
+      Integer(countParam, exception: false)
+    end
+    raise ArgumentError, "Invalid value for parameter 'count': #{countParam}" unless count&.positive?
+
+    expiration = parse_iso8601(expiration)
+    raise(ArgumentError, "Value for parameter expiration must be in the future: #{expiration}") unless expiration > DateTime.now
+
     cidr = params.delete(:cidr)
 
     options = {
       resource: host_factory,
-      expiration: DateTime.iso8601(expiration)
+      expiration: expiration
     }
     options[:cidr] = cidr if cidr
 
@@ -53,5 +64,11 @@ class HostFactoryTokensController < RestController
   def resource_id
     (@resource_id ||= \
        params[:host_factory]) || raise(ArgumentError, "host_factory")
+  end
+
+  def parse_iso8601(str)
+    DateTime.iso8601(str)
+  rescue
+    raise(ArgumentError, "Input is invalid ISO8601 datetime string: #{str}")
   end
 end

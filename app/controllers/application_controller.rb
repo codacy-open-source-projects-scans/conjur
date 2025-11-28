@@ -1,10 +1,7 @@
 # frozen_string_literal: true
 
-require 'exceptions/enhanced_policy'
-
 class ApplicationController < ActionController::API
   include Authenticates
-  include ::ActionView::Layouts
 
   class Unauthorized < RuntimeError
     attr_reader :return_message_in_response
@@ -22,6 +19,9 @@ class ApplicationController < ActionController::API
   end
 
   class BadRequest < RuntimeError
+  end
+
+  class BadRequestWithBody < RuntimeError
   end
 
   class InternalServerError < RuntimeError
@@ -45,12 +45,20 @@ class ApplicationController < ActionController::API
   class UnprocessableEntity < RuntimeError
   end
 
+  class InvalidParameter < UnprocessableEntity
+  end
+
+  class Conflict < RuntimeError
+  end
+
   rescue_from Exceptions::RecordNotFound, with: :record_not_found
   rescue_from Errors::Conjur::MissingSecretValue, with: :render_secret_not_found
   rescue_from Exceptions::RecordExists, with: :record_exists
   rescue_from Exceptions::Forbidden, with: :forbidden
+  rescue_from Exceptions::MethodNotAllowed, with: :method_not_allowed
   rescue_from PG::InsufficientPrivilege, with: :not_allowed
   rescue_from BadRequest, with: :bad_request
+  rescue_from BadRequestWithBody, with: :render_bad_request_with_message
   rescue_from Unauthorized, with: :unauthorized
   rescue_from InternalServerError, with: :internal_server_error
   rescue_from ServiceUnavailable, with: :service_unavailable
@@ -60,8 +68,10 @@ class ApplicationController < ActionController::API
   rescue_from Sequel::ValidationFailed, with: :validation_failed
   rescue_from Sequel::NoMatchingRow, with: :no_matching_row
   rescue_from Sequel::ForeignKeyConstraintViolation, with: :foreign_key_constraint_violation
+  rescue_from Conflict, with: :conflict
   rescue_from Exceptions::EnhancedPolicyError, with: :enhanced_policy_error
   rescue_from Exceptions::InvalidPolicyObject, with: :policy_invalid
+  rescue_from Exceptions::PolicyLoadRecordNotFound, with: :policy_invalid
   rescue_from Conjur::PolicyParser::Invalid, with: :policy_invalid
   rescue_from Conjur::PolicyParser::ResolverError, with: :policy_invalid
   rescue_from NoMethodError, with: :validation_failed
@@ -73,6 +83,13 @@ class ApplicationController < ActionController::API
   rescue_from Errors::Authorization::AccessToResourceIsForbiddenForRole, with: :forbidden
   rescue_from Errors::Conjur::RequestedResourceNotFound, with: :resource_not_found
   rescue_from Errors::Authorization::InsufficientResourcePrivileges, with: :forbidden
+  rescue_from Errors::Authentication::Security::RoleNotAuthorizedOnResource, with: :forbidden
+  rescue_from Errors::Group::DuplicateMember, with: :conflict
+  rescue_from Errors::Conjur::APIHeaderMissing, with: :render_bad_request_with_message
+  rescue_from Errors::Conjur::ParameterMissing, with: :unprocessable_entity
+  rescue_from Errors::Conjur::ParameterValueInvalid, with: :unprocessable_entity
+  rescue_from Errors::Conjur::ParameterTypeInvalid, with: :unprocessable_entity
+  rescue_from OpenSSL::Cipher::CipherError, with: :data_key_invalid
 
   around_action :run_with_transaction
 
@@ -83,6 +100,20 @@ class ApplicationController < ActionController::API
   end
 
   private
+
+  def v2_header?
+    request.headers['Accept'] == V2RestController::API_V2_HEADER
+  end
+
+  def render_v2_error(status, msg = '')
+    response.headers['Content-Type'] = V2RestController::API_V2_HEADER
+    code = Rack::Utils.status_code(status)
+    msg.empty? ? head(status) : render(json: { code: code.to_s, message: msg }, status: status)
+  end
+
+  def conjur_config
+    Rails.application.config.conjur_config
+  end
 
   # Wrap the request in a transaction.
   def run_with_transaction(&block)
@@ -96,6 +127,9 @@ class ApplicationController < ActionController::API
 
   def render_resource_not_not_found e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:not_found, e.message) if v2_header?
+
     render(json: {
       error: {
         code: "not_found",
@@ -133,7 +167,7 @@ class ApplicationController < ActionController::API
     if e.is_a?(Sequel::ForeignKeyConstraintViolation) &&
       e.cause.is_a?(PG::ForeignKeyViolation) &&
       (e.cause.result.error_field(PG::PG_DIAG_MESSAGE_DETAIL) =~ /Key \(([^)]+)\)=\(([^)]+)\) is not present in table "([^"]+)"/  rescue false)
-      violating_key = $2
+      violating_key = ::Regexp.last_match(2)
 
       exc = Exceptions::RecordNotFound.new(violating_key)
       render_record_not_found(exc)
@@ -173,7 +207,7 @@ class ApplicationController < ActionController::API
   def policy_invalid e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
 
-    msg = e.message == nil ? e.to_s : e.message
+    msg = e.message.nil? ? e.to_s : e.message
     error = { code: "policy_invalid", message: msg }
 
     if e.instance_of?(Conjur::PolicyParser::Invalid)
@@ -201,6 +235,17 @@ class ApplicationController < ActionController::API
     }, status: :unprocessable_entity)
   end
 
+  def log_backtrace(err)
+    err.backtrace.each do |line|
+      # We want to print a minimal stack trace in INFO level so that it is easier
+      # to understand the issue. To do this, we filter the trace output to only
+      # Conjur application code, and not code from the Gem dependencies.
+      # We still want to print the full stack trace (including the Gem dependencies
+      # code) so we print it in DEBUG level.
+      line.include?(ENV['GEM_HOME']) ? logger.debug(line) : logger.info(line)
+    end
+  end
+
   def argument_error e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
 
@@ -214,6 +259,9 @@ class ApplicationController < ActionController::API
 
   def record_exists e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:conflict, e.message) if v2_header?
+
     render(json: {
       error: {
         code: "conflict",
@@ -229,6 +277,8 @@ class ApplicationController < ActionController::API
   end
 
   def forbidden e
+    return render_v2_error(:forbidden) if v2_header?
+
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
     head(:forbidden)
   end
@@ -245,6 +295,9 @@ class ApplicationController < ActionController::API
 
   def conflict e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:conflict, e.message) if v2_header?
+
     render(json: {
       error: {
         code: :conflict,
@@ -255,11 +308,30 @@ class ApplicationController < ActionController::API
 
   def bad_request e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:unprocessable_entity, e.message) if v2_header?
+
     head(:bad_request)
+  end
+
+  def render_bad_request_with_message e
+    logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:bad_request, e.message) if v2_header? || e.is_a?(Errors::Conjur::APIHeaderMissing)
+
+    render(json: {
+      error: {
+        code: :bad_request,
+        message: e.message
+      }
+    }, status: :bad_request)
   end
 
   def unprocessable_entity e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:unprocessable_entity, e.message) if v2_header?
+
     render(json: {
       error: {
         code: :unprocessable_entity,
@@ -280,6 +352,9 @@ class ApplicationController < ActionController::API
 
   def unauthorized e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    return render_v2_error(:unauthorized) if v2_header?
+
     if e.return_message_in_response
       render(json: {
         error: {
@@ -355,6 +430,8 @@ class ApplicationController < ActionController::API
   end
 
   def render_record_not_found e
+    return render_v2_error(:not_found, e.message) if v2_header?
+
     render(json: {
       error: {
         code: "not_found",
@@ -371,5 +448,15 @@ class ApplicationController < ActionController::API
 
   def error_code_of_exception_class cls
     cls.to_s.underscore.split('/')[-1]
+  end
+
+  def data_key_invalid e
+    logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+    render json: {
+      error: {
+        code: "data_key_invalid",
+        message: "Conjur data key is invalid or does not match encrypted data. Please check your CONJUR_DATA_KEY."
+      }
+    }, status: :unprocessable_entity
   end
 end

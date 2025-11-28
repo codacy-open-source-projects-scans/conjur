@@ -45,6 +45,7 @@ These are defined in runConjurTests, and also include the one-offs
     conjur_rack
     azure_authenticator
     gcp_authenticator
+    iam_authenticator
 */
 @Library("product-pipelines-shared-library") _
 
@@ -66,6 +67,7 @@ properties([
 
 // Performs release promotion.  No other stages will be run
 if (params.MODE == "PROMOTE") {
+
   release.promote(params.VERSION_TO_PROMOTE) { infrapool, sourceVersion, targetVersion, assetDirectory ->
     env.INFRAPOOL_PRODUCT_NAME = "${productName}"
     env.INFRAPOOL_DD_PRODUCT_TYPE_NAME = "${productTypeName}"
@@ -126,11 +128,11 @@ if (params.MODE == "PROMOTE") {
       docker tag registry.tld/conjur-ubi:${sourceVersion}-arm64 conjur-ubi:${sourceVersion}-arm64
 
       # Promote both images for AMD64 and ARM64
-      summon -f ./secrets.yml ./publish-images.sh --promote --redhat --base-version=${sourceVersion} --version=${targetVersion}
+      summon -f ./secrets.yml ./publish-images.sh --promote --base-version=${sourceVersion} --version=${targetVersion}
       summon -f ./secrets.yml ./publish-images.sh --promote --base-version=${sourceVersion} --version=${targetVersion} --arch=arm64
       
       # Promote manifest that links above images
-      summon -f ./secrets.yml ./publish-manifest.sh --promote --dockerhub --base-version=${sourceVersion} --version=${targetVersion}
+      summon -f ./secrets.yml ./publish-manifest.sh --promote --redhat --dockerhub --base-version=${sourceVersion} --version=${targetVersion}
     """
 
     // Ensure the working directory is a safe git directory for the subsequent
@@ -138,7 +140,7 @@ if (params.MODE == "PROMOTE") {
     sh 'git config --global --add safe.directory "$(pwd)"'
 
     build(
-      job: 'Conjur-Enterprise/Conjur-Enterprise-conjurops/main/Conjur-Enterprise-conjurops-main-full/master',
+      job: 'Conjur-Enterprise-conjurops/main/Conjur-Enterprise-conjurops-main-full/master',
       parameters:[
         string(name: 'conjur_oss_source_image', value: "cyberark/conjur:${targetVersion}")
       ],
@@ -813,11 +815,6 @@ pipeline {
 
               environment {
                 // TODO: Move this into the authenticators_azure bash script.
-                INFRAPOOL_AZURE_AUTHN_INSTANCE_IP = INFRAPOOL_AZURE_EXECUTORV2_AGENT_0.agentSh(
-                  script: 'curl "http://checkip.amazonaws.com"',
-                  returnStdout: true
-                ).trim()
-                // TODO: Move this into the authenticators_azure bash script.
                 INFRAPOOL_SYSTEM_ASSIGNED_IDENTITY = INFRAPOOL_AZURE_EXECUTORV2_AGENT_0.agentSh(
                   script: 'ci/test_suites/authenticators_azure/get_system_assigned_identity.sh',
                   returnStdout: true
@@ -858,185 +855,150 @@ pipeline {
                 }
               }
             }
-            /**
-            * GCP Authenticator -- Token Stashing -- Stage 1 of 3
-            *
-            * In this stage, a GCE instance node is allocated, a script runs
-            * and retrieves all the tokens that will be used in authn-gcp
-            * tests.  The token are stashed, and later un-stashed and used in
-            * the stage that runs the GCP Authenticator tests.  This way we can
-            * have a light-weight GCE instance that has no dependency on
-            * conjurops or git identities and is not open for SSH.
-            */
-            stage('GCP Authenticator preparation - Allocate GCE Instance') {
+
+            stage('GCP Authenticator'){
               when {
                 expression {
                   testShouldRun(params.RUN_ONLY, "gcp_authenticator")
                 }
               }
-              steps {
-                echo '-- Allocating Google Compute Engine'
+              stages {
+                /**
+                * GCP Authenticator -- Token Stashing -- Stage 1 of 3
+                *
+                * In this stage, a GCE instance node is allocated, a script runs
+                * and retrieves all the tokens that will be used in authn-gcp
+                * tests.  The token are stashed, and later un-stashed and used in
+                * the stage that runs the GCP Authenticator tests.  This way we can
+                * have a light-weight GCE instance that has no dependency on
+                * conjurops or git identities and is not open for SSH.
+                */
+                stage('GCP Authenticator preparation - Allocate GCE Instance') {
+                  steps {
+                    echo '-- Allocating Google Compute Engine'
 
-                script {
-                  dir('ci/test_suites/authenticators_gcp') {
-                    INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentStash(
-                      name: 'get_gce_tokens_script',
-                      includes: '''
-                        get_gce_tokens_to_files.sh,
-                        get_tokens_to_files.sh,
-                        tokens_config.json
-                      '''
-                    )
-                  }
-
-                  echo '-- Google Compute Engine allocated'
-                  echo '-- Get compute engine instance project name from ' +
-                    'Google metadata server.'
-                  // TODO: Move this into get_gce_tokens_to_files.sh
-                  env.INFRAPOOL_GCP_PROJECT = INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentSh(
-                    script: 'curl -s -H "Metadata-Flavor: Google" \
-                      "http://metadata.google.internal/computeMetadata/v1/project/project-id"',
-                    returnStdout: true
-                  ).trim()
-                  INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentUnstash(name: 'get_gce_tokens_script')
-                  INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentSh('./get_gce_tokens_to_files.sh')
-                  INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentStash(
-                    name: 'authnGceTokens',
-                    includes: 'gce_token_*',
-                    allowEmpty:false
-                  )
-                }
-              }
-              post {
-                failure {
-                  script {
-                    env.GCP_ENV_ERROR = "true"
-                  }
-                }
-                success {
-                  script {
-                    env.GCE_TOKENS_FETCHED = "true"
-                  }
-                  echo '-- Finished fetching GCE tokens.'
-                }
-              }
-            }
-
-            /**
-            * GCP Authenticator -- Allocate Function -- Stage 2 of 3
-            *
-            * In this stage, Google SDK container executes a script to deploy a
-            * function, the function accepts audience in query string and
-            * returns a token with that audience.  All the tokens required for
-            * testings are obtained and written to function directory, the post
-            * stage branch deletes the function.  This stage depends on stage:
-            * 'GCP Authenticator preparation - Allocate GCE Instance' to set
-            * the GCP project env var.
-            */
-            stage('GCP Authenticator preparation - Allocate Google Function') {
-              when {
-                expression {
-                  testShouldRun(params.RUN_ONLY, "gcp_authenticator")
-                }
-              }
-              environment {
-                INFRAPOOL_GCP_FETCH_TOKEN_FUNCTION = "fetch_token_${BUILD_NUMBER}"
-                INFRAPOOL_IDENTITY_TOKEN_FILE = 'identity-token'
-                INFRAPOOL_GCP_OWNER_SERVICE_KEY_FILE = "sa-key-file.json"
-              }
-              steps {
-                echo "Waiting for GCP project name (Set by stage: " +
-                  "'GCP Authenticator preparation - Allocate GCE Instance')"
-                timeout(time: 10, unit: 'MINUTES') {
-                  waitUntil {
                     script {
-                      return (
-                        env.INFRAPOOL_GCP_PROJECT != null || env.GCP_ENV_ERROR == "true"
-                      )
-                    }
-                  }
-                }
-                script {
-                  if (env.GCP_ENV_ERROR == "true") {
-                    error('GCP_ENV_ERROR cannot deploy function')
-                  }
-
-                  dir('ci/test_suites/authenticators_gcp') {
-                    INFRAPOOL_EXECUTORV2_AGENT_0.agentSh('summon ./deploy_function_and_get_tokens.sh')
-                  }
-                }
-              }
-              post {
-                success {
-                  echo "-- Google Cloud test env is ready"
-                  script {
-                    env.GCP_FUNC_TOKENS_FETCHED = "true"
-                  }
-                }
-                failure {
-                  echo "-- GCP function deployment stage failed"
-                  script {
-                    env.GCP_ENV_ERROR = "true"
-                  }
-                }
-                always {
-                  script {
-                    dir('ci/test_suites/authenticators_gcp') {
-                      INFRAPOOL_EXECUTORV2_AGENT_0.agentSh '''
-                        # Cleanup Google function
-                        summon ./run_gcloud.sh cleanup_function.sh
-                      '''
-                    }
-                  }
-                }
-              }
-            }
-            /**
-            * GCP Authenticator -- Run Tests -- Stage 3 of 3
-            *
-            * We have two preparation stages before running the GCP
-            * Authenticator tests stage.  This stage waits for GCP preparation
-            * stages to complete, un-stashes the tokens created in stage: 'GCP
-            * Authenticator preparation - Allocate GCE Instance' and runs the
-            * gcp-authn tests.
-            */
-            stage('GCP Authenticator - Run Tests') {
-              when {
-                expression {
-                  testShouldRun(params.RUN_ONLY, "gcp_authenticator")
-                }
-              }
-              steps {
-                echo('Waiting for GCP Tokens provisioned by prep stages.')
-
-                timeout(time: 10, unit: 'MINUTES') {
-                  waitUntil {
-                    script {
-                      return (
-                        env.GCP_ENV_ERROR == "true" ||
-                        (
-                          env.GCP_FUNC_TOKENS_FETCHED == "true" &&
-                          env.GCE_TOKENS_FETCHED == "true"
+                      dir('ci/test_suites/authenticators_gcp') {
+                        INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentStash(
+                          name: 'get_gce_tokens_script',
+                          includes: '''
+                            get_gce_tokens_to_files.sh,
+                            get_tokens_to_files.sh,
+                            tokens_config.json
+                          '''
                         )
+                      }
+
+                      echo '-- Google Compute Engine allocated'
+                      echo '-- Get compute engine instance project name from ' +
+                        'Google metadata server.'
+                      // TODO: Move this into get_gce_tokens_to_files.sh
+                      env.INFRAPOOL_GCP_PROJECT = INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentSh(
+                        script: 'curl -s -H "Metadata-Flavor: Google" \
+                          "http://metadata.google.internal/computeMetadata/v1/project/project-id"',
+                        returnStdout: true
+                      ).trim()
+                      INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentUnstash(name: 'get_gce_tokens_script')
+                      INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentSh('./get_gce_tokens_to_files.sh')
+                      INFRAPOOL_GCP_EXECUTORV2_AGENT_0.agentStash(
+                        name: 'authnGceTokens',
+                        includes: 'gce_token_*',
+                        allowEmpty:false
                       )
                     }
                   }
-                }
-                script {
-                  if (env.GCP_ENV_ERROR == "true") {
-                    error(
-                      'GCP_ENV_ERROR: Check logs for errors in stages 1 and 2'
-                    )
+                  post {
+                    failure {
+                      echo 'GCP Stage 1 Failure'
+                    }
+                    success {
+                      echo 'GCP Stage 1 Success'
+                    }
                   }
                 }
-                script {
-                  dir('ci/test_suites/authenticators_gcp/tokens') {
-                    INFRAPOOL_EXECUTORV2_AGENT_0.agentUnstash name: 'authnGceTokens'
+
+                /**
+                * GCP Authenticator -- Allocate Function -- Stage 2 of 3
+                *
+                * In this stage, Google SDK container executes a script to deploy a
+                * function, the function accepts audience in query string and
+                * returns a token with that audience.  All the tokens required for
+                * testings are obtained and written to function directory, the post
+                * stage branch deletes the function.  This stage depends on stage:
+                * 'GCP Authenticator preparation - Allocate GCE Instance' to set
+                * the GCP project env var.
+                */
+                stage('GCP Authenticator preparation - Allocate Google Function') {
+                  environment {
+                    INFRAPOOL_GCP_FETCH_TOKEN_FUNCTION = "fetch_token_${BUILD_NUMBER}"
+                    INFRAPOOL_IDENTITY_TOKEN_FILE = 'identity-token'
+                    INFRAPOOL_GCP_OWNER_SERVICE_KEY_FILE = "sa-key-file.json"
                   }
-                  INFRAPOOL_EXECUTORV2_AGENT_0.agentSh 'ci/test authenticators_gcp'
+                  steps {
+                    script {
+                      dir('ci/test_suites/authenticators_gcp') {
+                        INFRAPOOL_EXECUTORV2_AGENT_0.agentSh('summon ./deploy_function_and_get_tokens.sh')
+                      }
+                    }
+                  }
+
+                  post {
+                    success {
+                      echo 'GCP Stage 2 Success'
+                    }
+                    failure {
+                      echo 'GCP Stage 2 Failure'
+                    }
+                    always {
+                      script {
+                        dir('ci/test_suites/authenticators_gcp') {
+                          INFRAPOOL_EXECUTORV2_AGENT_0.agentSh '''
+                            # Cleanup Google function
+                            summon ./run_gcloud.sh cleanup_function.sh
+                          '''
+                        }
+                      }
+                    }
+                  }
+                }
+                /**
+                * GCP Authenticator -- Run Tests -- Stage 3 of 3
+                *
+                * We have two preparation stages before running the GCP
+                * Authenticator tests stage.  This stage waits for GCP preparation
+                * stages to complete, un-stashes the tokens created in stage: 'GCP
+                * Authenticator preparation - Allocate GCE Instance' and runs the
+                * gcp-authn tests.
+                */
+                stage('GCP Authenticator - Run Tests') {
+                  steps {
+                    script {
+                      dir('ci/test_suites/authenticators_gcp/tokens') {
+                        INFRAPOOL_EXECUTORV2_AGENT_0.agentUnstash name: 'authnGceTokens'
+                      }
+                      INFRAPOOL_EXECUTORV2_AGENT_0.agentSh 'ci/test authenticators_gcp'
+                    }
+                  }
+                  post {
+                    failure {
+                      echo 'GCP Stage 3 Failure'
+                    }
+                    success {
+                      echo 'GCP Stage 3 Success'
+                    }
+                  }
+                }
+              }
+              post {
+                failure {
+                  echo 'GCP Overall Failure'
+                }
+                success {
+                  echo 'GCP Overall Success'
                 }
               }
             }
+
           }
         }
       }
@@ -1099,6 +1061,7 @@ pipeline {
                 authenticators_gcp/cucumber_results.html,
                 authenticators_status/cucumber_results.html,
                 authenticators_k8s/cucumber_results.html,
+                authenticators_iam/cucumber_results.html,
                 policy/cucumber_results.html,
                 rotators/cucumber_results.html
               ''',
@@ -1172,10 +1135,17 @@ pipeline {
       steps {
         script {
           release(INFRAPOOL_EXECUTORV2_AGENT_0) { billOfMaterialsDirectory, assetDirectory ->
-            // Publish docker images
-            INFRAPOOL_EXECUTORV2_AGENT_0.agentSh './publish-images.sh --edge'
-            INFRAPOOL_EXECUTORV2ARM_AGENT_0.agentSh './publish-images.sh --edge --arch=arm64'
-            INFRAPOOL_EXECUTORV2_AGENT_0.agentSh './publish-manifest.sh --edge'
+            // Only push edge images when on master branch. This is to avoid patch releases from being the current edge image.
+            if (env.BRANCH_NAME == 'master') {
+              INFRAPOOL_EXECUTORV2_AGENT_0.agentSh './publish-images.sh --edge --release'
+              INFRAPOOL_EXECUTORV2ARM_AGENT_0.agentSh './publish-images.sh --edge --release --arch=arm64'
+              INFRAPOOL_EXECUTORV2_AGENT_0.agentSh './publish-manifest.sh --edge'
+            } else {
+              echo "Skipping edge image publishing - not on default branch (current branch: ${env.BRANCH_NAME})"
+              INFRAPOOL_EXECUTORV2_AGENT_0.agentSh './publish-images.sh --release'
+              INFRAPOOL_EXECUTORV2ARM_AGENT_0.agentSh './publish-images.sh --release --arch=arm64'
+              INFRAPOOL_EXECUTORV2_AGENT_0.agentSh './publish-manifest.sh'
+            }
 
             // Create deb and rpm packages (ARM64)
             INFRAPOOL_EXECUTORV2ARM_AGENT_0.agentSh 'echo "CONJUR_VERSION=5" >> debify.env'
@@ -1291,6 +1261,11 @@ def conjurTests(infrapool) {
     "authenticators_ldap": [
       "LDAP Authenticator - ${env.STAGE_NAME}": {
         infrapool.agentSh 'ci/test authenticators_ldap'
+      }
+    ],
+    "authenticators_iam": [
+      "IAM Authenticator - ${env.STAGE_NAME}": {
+        infrapool.agentSh 'ci/test authenticators_iam'
       }
     ],
     "api": [

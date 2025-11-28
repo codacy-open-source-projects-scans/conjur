@@ -35,6 +35,9 @@ class AccountsController < ApplicationController
   def account_name
     # Rails 5 requires parameters to be explicitly permitted before converting 
     # to Hash.  See: https://stackoverflow.com/a/46029524
-    params.permit(:id)[:id]
+    name = params.permit(:id)[:id]
+    raise(ArgumentError, "Invalid account: #{name}") if name.include?('/')
+    
+    name
   end
 end

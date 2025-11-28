@@ -8,6 +8,19 @@
 #
 # See also ./logs.rb
 module Errors
+
+  module Group
+    DuplicateMember = ::Util::TrackableErrorClass.new(
+      msg: "'{0}' (kind='{1}') is already a member of '{2}'",
+      code: "CONJ00180W"
+    )
+
+    ResourceNotMember = ::Util::TrackableErrorClass.new(
+      msg: "'{0}' (kind='{1}') isn't a member of '{2}'",
+      code: "CONJ00181W"
+    )
+  end
+
   module Conjur
 
     RequiredResourceMissing = ::Util::TrackableErrorClass.new(
@@ -32,6 +45,21 @@ module Errors
       code: "CONJ00065E"
     )
 
+    ParameterTypeInvalid = ::Util::TrackableErrorClass.new(
+      msg: "The '{0}' parameter must be of 'type={1}'",
+      code: "CONJ00192W"
+    )
+
+    ParameterMissing = ::Util::TrackableErrorClass.new(
+      msg: "Missing required parameter: {0}",
+      code: "CONJ00190W"
+    )
+
+    ParameterValueInvalid = ::Util::TrackableErrorClass.new(
+      msg: "The value in the {0} parameter is not valid. Error: {1}",
+      code: "CONJ00191W"
+    )
+
     BadSecretEncoding = ::Util::TrackableErrorClass.new(
       msg: "Issue encoding secret into JSON format, try including 'Accept-Encoding: base64' " \
           "header in request.",
@@ -41,6 +69,11 @@ module Errors
     MissingSecretValue = ::Util::TrackableErrorClass.new(
       msg: "Variable {0-variable-id} is empty or not found.",
       code: "CONJ00076E"
+    )
+
+    APIHeaderMissing = ::Util::TrackableErrorClass.new(
+      msg: "The api belongs to v2 APIs but it missing the version \"{0-api-header}\" in the Accept header",
+      code: "CONJ00194W"
     )
 
     KeyRotationNotApplicable = ::Util::TrackableErrorClass.new(
@@ -774,34 +807,6 @@ module Errors
     InvalidOrMissingMetricType = ::Util::TrackableErrorClass.new(
       msg: "Invalid or missing metric type: {0-metric-type}",
       code: "CONJ00152E"
-    )
-  end
-
-  module Factories
-
-    FactoryNotFound = ::Util::TrackableErrorClass.new(
-      msg: "No Factory found for '{0-factory-name}'",
-      code: 'CONJ00157E'
-    )
-
-    FactoryGeneratedPolicyNotFound = ::Util::TrackableErrorClass.new(
-      msg: "No policy found for Factory generated resource: '{0-policy-identifier}'",
-      code: 'CONJ00158E'
-    )
-
-    MissingFactoryAnnotation = ::Util::TrackableErrorClass.new(
-      msg: "No factory annotation found for policy: '{0-policy-identifier}'",
-      code: 'CONJ00159E'
-    )
-
-    InvalidAction = ::Util::TrackableErrorClass.new(
-      msg: "Invalid action: '{0-action}', only {1-allowed} are allowed",
-      code: 'CONJ00160E'
-    )
-
-    NoVariablesFound = ::Util::TrackableErrorClass.new(
-      msg: "No variables found for Factory created resource: '{0-policy-path}'",
-      code: 'CONJ00161E'
     )
   end
 

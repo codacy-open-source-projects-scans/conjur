@@ -9,6 +9,10 @@ Given(/^I set the "([^"]*)" header to "([^"]*)"$/) do |header, value|
   headers[header] = value
 end
 
+Given(/^I set the Accept header to APIv2$/) do
+  headers["Accept"] = V2RestController::API_V2_HEADER
+end
+
 Given(/^I clear the "([^"]*)" header$/) do |header|
   headers[header] = nil
 end
@@ -222,6 +226,10 @@ Then(/^the HTTP response content type is "([^"]*)"$/) do |content_type|
   expect(@content_type).to match(content_type)
 end
 
+Then(/^the HTTP response content type is APIv2$/) do
+  expect(@content_type).to match(V2RestController::API_V2_HEADER)
+end
+
 Then(/^the HTTP response is base64 encoded$/) do
   expect(@result.headers[:content_encoding]).to eq("base64")
 
@@ -287,7 +295,6 @@ When(/^I( (?:can|successfully))? POST "([^"]*)" with all files from folder "([^"
         post_json path, file.read
       end
     end
-
   end
 end
 
@@ -299,7 +306,6 @@ When(/^I( (?:can|successfully))? PUT "([^"]*)" with all files from folder "([^"]
         put_json path, file.read
       end
     end
-
   end
 end
 
@@ -311,6 +317,44 @@ When(/^I( (?:can|successfully))? PATCH "([^"]*)" with all files from folder "([^
         patch_json path, file.read
       end
     end
+  end
+end
 
+Then(/^the response body is a valid timestamp$/) do
+  timestamp_string = @result.to_s.strip
+  expect(timestamp_string).not_to be_empty
+  expect { Time.parse(timestamp_string) }.not_to raise_error
+end
+
+And(/^I save the response body as "([^"]*)"$/) do |name|
+  @saved_responses ||= {}
+  @saved_responses[name] = @result.to_s.strip
+end
+
+And(/^I wait for (\d+) seconds?$/) do |seconds|
+  sleep(seconds.to_i)
+end
+
+Then(/^the response body is newer than "([^"]*)"$/) do |saved_name|
+  @saved_responses ||= {}
+  saved_timestamp = @saved_responses[saved_name]
+  expect(saved_timestamp).not_to be_nil, "No saved response found for '#{saved_name}'"
+  
+  current_timestamp = @result.to_s.strip
+  expect(current_timestamp).not_to be_empty
+  
+  saved_time = Time.parse(saved_timestamp)
+  current_time = Time.parse(current_timestamp)
+  
+  expect(current_time).to be > saved_time
+end
+
+When(/^I( (?:can|successfully))? GET "([^"]*)" with username "([^"]*)" and saved password "([^"]*)"$/) do |can, path, username, saved_password_name|
+  @saved_responses ||= {}
+  password = @saved_responses[saved_password_name]
+  expect(password).not_to be_nil, "No saved response found for '#{saved_password_name}'"
+  
+  try_request can do
+    get_json path, user: username, password: password
   end
 end

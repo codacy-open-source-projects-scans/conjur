@@ -3,13 +3,12 @@
 # Parses a policy -- from a YAML file -- into records using Conjur::PolicyParser.
 # Versioning, storage in DB, and results presentation are left for the caller.
 
-require 'exceptions/enhanced_policy'
-
 module Commands
   module Policy
     class Parse
 
-      def call(account:,
+      def call(
+        account:,
         policy_id:,
         owner_id:,
         policy_text:,
@@ -46,17 +45,12 @@ module Commands
           # Error format, per gems/policy-parser/lib/conjur/policy/invalid.rb
           #   "Error at line #{mark.line}, column #{mark.column} in #{filename} : #{message}"
           # The 'message' field is readable as 'detail_message'.
-          error = Exceptions::EnhancedPolicyError.new(
-            original_error: e,
-            detail_message: e.detail_message
-          )
+          error = create_enhanced_error(e, policy_id, detail_message: e.detail_message)
 
         rescue Conjur::PolicyParser::ResolverError => e
           # Error format, per gems/policy-parser/lib/conjur/policy/invalid.rb
           # The 'message' field is the same as 'detail_message'.
-          error = Exceptions::EnhancedPolicyError.new(
-            original_error: e
-          )
+          error = create_enhanced_error(e, policy_id)
 
         rescue Psych::SyntaxError => e
           # Error format, per https://github.com/ruby/psych/blob/master/lib/psych/syntax_error.rb
@@ -64,19 +58,34 @@ module Commands
           #   err      = [problem, context].compact.join ' '
           #   filename = file || '<unknown>'
           #   message  = "(%s): %s at line %d column %d" % [filename, err, line, col]
-          error = Exceptions::EnhancedPolicyError.new(
-            original_error: e,
-            detail_message: [e.problem, e.context].compact.join(' ')
-          )
+          detail_message = [e.problem, e.context].compact.join(' ')
+          error = create_enhanced_error(e, policy_id, detail_message: detail_message)
 
         rescue => e
           # Everything else can be wrapped but may not be safe to raise.
-          error = Exceptions::EnhancedPolicyError.new(
-            original_error: e
-          )
+          error = create_enhanced_error(e, policy_id)
         end
 
         PolicyParse.new(resolved_records, error)
+      end
+
+      private
+
+      def create_enhanced_error(original_error, policy_id, detail_message: nil)
+        # Extract line information
+        offending_lines = []
+        if original_error.respond_to?(:line) && original_error.line.is_a?(Numeric) && original_error.line > 0
+          offending_lines = [original_error.line]
+        end
+        
+        Exceptions::EnhancedPolicyError.new(
+          original_error: original_error,
+          detail_message: detail_message,
+          additional_context: {
+            policy_id: policy_id,
+            offending_lines: offending_lines
+          }
+        )
       end
     end
   end

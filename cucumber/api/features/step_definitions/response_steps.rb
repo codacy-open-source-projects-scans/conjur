@@ -40,9 +40,18 @@ Then(/^the resource list should( not)? contain "([^"]*)" "([^"]*)"$/) do |invert
   expect(@result.map{|r| r['id']}).send(mode, include(id))
 end
 
+Then(/^the result is:$/) do |string|
+  expect(@result).to eq(string)
+end
+
+Then(/^the result as string is:$/) do |string|
+  expect(@result.to_s).to eq(string)
+end
+
 Then(/^the result is empty$/) do
   expect(@result).to be_empty
 end
+
 
 Then(/^the text result is:$/) do |value|
   expect(@result).to be

@@ -5,7 +5,7 @@ class ResourcesController < RestController
   include AssumedRole
 
   def index
-    # Rails 5 requires parameters to be explicitly permitted before converting 
+    # Rails 5 requires parameters to be explicitly permitted before converting
     # to Hash.  See: https://stackoverflow.com/a/46029524
     allowed_params = %i[account kind limit offset search]
     options = params.permit(*allowed_params)
@@ -15,10 +15,12 @@ class ResourcesController < RestController
     # limit does not exceed the maximum.
     # The maximum limit should not be apply if this is a count request.
     if conjur_config.api_resource_list_limit_max.positive? && !params[:count]
-      # If no limit is given, default the limit to the configured maximum
-      options[:limit] = conjur_config.api_resource_list_limit_max.to_s unless options[:limit]
+      # If no limit nor offset is given, default the limit to the configured maximum
+      # When offset is given sequel will default limit to 10
+      options[:limit] = conjur_config.api_resource_list_limit_max.to_s unless options[:limit] || options[:offset]
 
-      unless options[:limit].to_i <= conjur_config.api_resource_list_limit_max
+      # Because synchronizer uses limit of 10000 we have to allow this magic value for maintaining backward compatibility
+      unless options[:limit].to_i <= conjur_config.api_resource_list_limit_max || options[:limit].to_i == 10000
         error_message = "'Limit' parameter must not exceed #{conjur_config.api_resource_list_limit_max}"
         audit_list_failure(options, error_message)
         raise ApplicationController::UnprocessableEntity, error_message
@@ -124,10 +126,6 @@ class ResourcesController < RestController
         error_message: err.message
       )
     )
-  end
-
-  def conjur_config
-    Rails.application.config.conjur_config
   end
 
   private

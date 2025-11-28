@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require 'exceptions/enhanced_policy'
-
 class PoliciesController < RestController
   include FindResource
   include AuthorizeResource
@@ -15,11 +13,16 @@ class PoliciesController < RestController
   # is provided in the request.
   set_default_content_type_for_path(%r{^/policies}, 'application/x-yaml')
 
+  # To avoid unexpected behavior, we check annotation keys for known policy attributes and ouput a warning if there is a match.
+  KNOWN_POLICY_ATTRIBUTES = %w[
+      id owner body user annotations restricted_to permit deny role privileges resource
+      grant revoke member host-factory layers layer variable kind mime_type delete record
+      group host webservice
+    ].freeze
+
   def get
     action = :read
-    unless params[:kind] == 'policy'
-      raise(Errors::EffectivePolicy::PathParamError.new(params[:kind]))
-    end
+
     authorize_ownership
 
     allowed_params = %i[account kind identifier depth limit]
@@ -30,11 +33,13 @@ class PoliciesController < RestController
     resources = EffectivePolicy::GetEffectivePolicy.new(**options).verify.call
     policy_tree = EffectivePolicy::BuildPolicyTree.new.call(options[:identifier], resources)
 
-    Audit.logger.log(Audit::Event::Policy.new(
-      operation: action, subject: options,
-      user: current_user, client_ip: request.ip,
-      error_message: nil # No error message because reading was successful
-    ))
+    Audit.logger.log(
+      Audit::Event::Policy.new(
+        operation: action, subject: options,
+        user: current_user, client_ip: request.ip,
+        error_message: nil # No error message because reading was successful
+      )
+    )
 
     json_content_type = 'application/json'
     if request.headers["Content-Type"] == json_content_type
@@ -42,7 +47,6 @@ class PoliciesController < RestController
     else
       render(plain: policy_tree.to_yaml, content_type: "application/x-yaml")
     end
-
   rescue Errors::EffectivePolicy::NumberParamError, Errors::EffectivePolicy::PathParamError => e
     audit_failure(e, action)
     raise ApplicationController::BadRequest, e.message
@@ -101,14 +105,27 @@ class PoliciesController < RestController
 
   private
 
-  def enhance_error(error)
+  def enhance_error(error, policy_id: nil)
+    context_policy_id = policy_id || resource&.identifier
     enhanced = error
     unless error.instance_of?(Exceptions::EnhancedPolicyError)
       enhanced = Exceptions::EnhancedPolicyError.new(
-        original_error: error
+        original_error: error,
+        additional_context: {
+          policy_id: context_policy_id,
+          offending_lines: extract_offending_lines(error)
+        }
       )
     end
     enhanced
+  end
+
+  def extract_offending_lines(error)
+    if error.respond_to?(:line)
+      [error.line]
+    else
+      []
+    end
   end
 
   # Policy processing is a function of the policy mode request (load/update/replace) and
@@ -125,8 +142,8 @@ class PoliciesController < RestController
     # Has a policy error been encountered yet?
     policy_erred = lambda {
       !policy_result.nil? &&
-      !policy_result.policy_parse.nil? &&
-      !policy_result.policy_parse.error.nil?
+        !policy_result.policy_parse.nil? &&
+        !policy_result.policy_parse.error.nil?
     }
 
     # policy_mode is used to call loader methods
@@ -135,10 +152,11 @@ class PoliciesController < RestController
       policy_mode = mode_class.from_policy(
         policy_result.policy_parse,
         policy_result.policy_version,
-        strategy_class
+        strategy_class,
+        current_user
       )
     }
-  
+
     # We wrap policy operations (parsing, loading, applying business rules)
     # in rescue blocks and capture the exceptions as the error results.
     # This prevents exceptions from rising uncontrollably (which would be a
@@ -149,6 +167,7 @@ class PoliciesController < RestController
         get_policy_mode.call(strategy_class)
         policy_mode.call_pr(policy_result) unless policy_erred.call
       rescue => e
+        e = sql_to_policy_error(e)
         policy_result.error=(enhance_error(e))
       end
     }
@@ -190,8 +209,10 @@ class PoliciesController < RestController
     # Success
     audit_success(policy_result.policy_version)
 
+    response = policy_mode.report(policy_result)
+    response[:warnings] = policy_result.warnings if policy_result.warnings.present?
     render(
-      json: policy_mode.report(policy_result),
+      json: response,
       status: strategy_type == :orchestration ? :created : :ok
     )
 
@@ -206,13 +227,11 @@ class PoliciesController < RestController
   rescue Sequel::ForeignKeyConstraintViolation, Exceptions::RecordNotFound => e
     audit_failure(e, mode)
     raise e
-
   rescue => e
     original_error = e
-    if e.instance_of?(Exceptions::EnhancedPolicyError)
-      if e.original_error
-        original_error = e.original_error
-      end
+    enhanced_error = e.is_a?(Exceptions::EnhancedPolicyError) ? e : enhance_error(e)
+    if enhanced_error.instance_of?(Exceptions::EnhancedPolicyError) && enhanced_error.original_error
+      original_error = enhanced_error.original_error
     end
 
     audit_failure(original_error, mode)
@@ -220,11 +239,12 @@ class PoliciesController < RestController
     # Render Orchestration errors through ApplicationController
     raise original_error if strategy_type == :orchestration
 
+    # Render error response for validation
+    error_json = policy_mode.report(policy_result)
     render(
-      json: policy_mode.report(policy_result),
+      json: error_json,
       status: :unprocessable_entity
     )
-
   end
 
   # Auditing
@@ -332,10 +352,42 @@ class PoliciesController < RestController
       policy_filename: nil,  # filename is historical and no longer informative
       root_policy: is_root
     )
+    # Wrap parse error with EnhancedPolicyError if present and not already wrapped
+    # Note: Parse command now adds context, so this is mainly a fallback
+    if parse.error && !parse.error.is_a?(Exceptions::EnhancedPolicyError)
+      parse.error = enhance_error(parse.error, policy_id: policy.identifier)
+    end
     policy_result.policy_parse = (parse)
+
+    annotation_names = parse.records.flat_map do |rec|
+      rec.respond_to?(:annotations) && rec.annotations ? rec.annotations.keys : []
+    end.uniq
+    conflicts = annotation_names & KNOWN_POLICY_ATTRIBUTES
+    if conflicts.any?
+      policy_result.warnings ||= []
+      conflicts.each do |conflict|
+        policy_result.warnings << "Annotation '#{conflict}' matches a known policy attribute. This annotation will not be treated as a standard attribute and may not have the intended effect."
+      end
+    end
   end
 
   def publish_event
     Monitoring::PubSub.instance.publish('conjur.policy_loaded')
+  end
+
+  # This method is used to convert a Sequel::ForeignKeyConstraintViolation error
+  # into a PolicyLoadRecordNotFound error.
+  def sql_to_policy_error(exception)
+    if !exception.is_a?(Sequel::ForeignKeyConstraintViolation) ||
+        !exception.cause.is_a?(PG::ForeignKeyViolation)
+      return exception
+    end
+
+    # Try to parse the error message to find the violating key. This is based on
+    # `foreign_key_constraint_violation` in application_controller.rb.
+    return exception unless exception.cause.result.error_field(PG::PG_DIAG_MESSAGE_DETAIL) =~ /Key \(([^)]+)\)=\(([^)]+)\) is not present in table "([^"]+)"/
+
+    violating_key = ::Regexp.last_match(2)
+    Exceptions::PolicyLoadRecordNotFound.new(violating_key)
   end
 end

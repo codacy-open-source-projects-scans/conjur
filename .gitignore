@@ -39,6 +39,7 @@ cucumber/*/*_results.*
 
 apidocs/node_modules
 *.config
+!kics.config
 
 # Generated API docs
 api.html
@@ -76,3 +77,6 @@ dev/policies/authenticators/authn-oidc/identity-users.yml
 
 VERSION
 key.txt
+
+# Ignore node modules
+node_modules

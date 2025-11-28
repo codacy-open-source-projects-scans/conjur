@@ -74,7 +74,7 @@ class AuthenticateController < ApplicationController
 
       # Authenticator webservices created in policy
       configured:
-        Authentication::InstalledAuthenticators.configured_authenticators.sort,
+        DB::Repository::AuthenticatorConfigRepository.new.configured_authenticators.sort,
 
       # Authenticators white-listed in CONJUR_AUTHENTICATORS
       enabled: enabled_authenticators.sort
@@ -86,7 +86,7 @@ class AuthenticateController < ApplicationController
   def status
     Authentication::ValidateStatus.new.(
       authenticator_status_input: status_input,
-      enabled_authenticators: Authentication::InstalledAuthenticators.enabled_authenticators_str
+      enabled_authenticators: enabled_authenticators_str
     )
     log_audit_success(
       authn_params: status_input,
@@ -117,7 +117,7 @@ class AuthenticateController < ApplicationController
     params[:authenticator] = "authn-jwt"
     Authentication::AuthnJwt::ValidateStatus.new.call(
       authenticator_status_input: status_input,
-      enabled_authenticators: Authentication::InstalledAuthenticators.enabled_authenticators_str
+      enabled_authenticators: enabled_authenticators_str
     )
     render(json: { status: "ok" })
   rescue => e
@@ -127,29 +127,29 @@ class AuthenticateController < ApplicationController
 
   def update_config
     Authentication::UpdateAuthenticatorConfig.new.(
-      update_config_input: update_config_input
+      update_config_input: update_config_input(update_config_params)
     )
     log_audit_success(
-      authn_params: update_config_input,
+      authn_params: update_config_input(update_config_params),
       audit_event_class: Audit::Event::Authn::UpdateAuthenticatorConfig
     )
     head(:no_content)
   rescue => e
     log_audit_failure(
-      authn_params: update_config_input,
+      authn_params: update_config_input(update_config_params),
       audit_event_class: Audit::Event::Authn::UpdateAuthenticatorConfig,
       error: e
     )
     handle_authentication_error(e)
   end
 
-  def update_config_input
+  def update_config_input(input)
     @update_config_input ||= Authentication::UpdateAuthenticatorConfigInput.new(
-      account: params[:account],
-      authenticator_name: params[:authenticator],
-      service_id: params[:service_id],
+      account: input[:account],
+      authenticator_name: input[:authenticator],
+      service_id: input[:service_id],
       username: ::Role.username_from_roleid(current_user.role_id),
-      enabled: Rack::Utils.parse_nested_query(request.body.read)['enabled'] || false,
+      enabled: (input[:enabled].to_s.strip.downcase == 'true').to_s,
       client_ip: request.ip
     )
   end
@@ -167,7 +167,7 @@ class AuthenticateController < ApplicationController
     params[:authenticator] = "authn-jwt"
     authn_token = Authentication::AuthnJwt::OrchestrateAuthentication.new.call(
       authenticator_input: authenticator_input_without_credentials,
-      enabled_authenticators: Authentication::InstalledAuthenticators.enabled_authenticators_str
+      enabled_authenticators: enabled_authenticators_str
     )
     render_authn_token(authn_token)
   rescue => e
@@ -220,7 +220,7 @@ class AuthenticateController < ApplicationController
     authn_token = Authentication::Authenticate.new.(
       authenticator_input: input,
       authenticators: installed_authenticators,
-      enabled_authenticators: Authentication::InstalledAuthenticators.enabled_authenticators_str
+      enabled_authenticators: enabled_authenticators_str
     )
     log_audit_success(
       authn_params: input,
@@ -281,6 +281,33 @@ class AuthenticateController < ApplicationController
   end
 
   private
+
+  def update_config_params
+    body_allowed_params = %i[enabled]
+    path_allowed_params = %i[authenticator account service_id]
+    @update_config_params ||= params.permit(*path_allowed_params)
+      .slice(*path_allowed_params)
+      .to_h.symbolize_keys
+      .merge(
+        ActionController::Parameters.new(
+          case request.media_type
+          when nil, 'application/x-www-form-urlencoded'
+            Rack::Utils.parse_nested_query(request.body.read)
+          when 'application/json'
+            body = request.body.read
+            begin
+              JSON.parse(body)
+            rescue JSON::JSONError
+              raise ApplicationController::BadRequest, "Unable to parse request json body: #{body}"
+            end
+          else
+            {}
+          end
+        ).permit(*body_allowed_params)
+        .slice(*body_allowed_params)
+        .to_h.symbolize_keys
+      )
+  end
 
   def render_authn_token(authn_token)
     content_type = :json
@@ -368,19 +395,8 @@ class AuthenticateController < ApplicationController
     end
   end
 
-  def log_backtrace(err)
-    err.backtrace.each do |line|
-      # We want to print a minimal stack trace in INFO level so that it is easier
-      # to understand the issue. To do this, we filter the trace output to only
-      # Conjur application code, and not code from the Gem dependencies.
-      # We still want to print the full stack trace (including the Gem dependencies
-      # code) so we print it in DEBUG level.
-      line.include?(ENV['GEM_HOME']) ? logger.debug(line) : logger.info(line)
-    end
-  end
-
   def status_failure_response(error)
-    logger.debug("Status check failed with error: #{error.inspect}")
+    logger.info("Status check failed with error: #{error.inspect}")
 
     payload = {
       status: "error",
@@ -393,7 +409,7 @@ class AuthenticateController < ApplicationController
         :forbidden
       when Errors::Authentication::StatusNotSupported
         :not_implemented
-      when Errors::Authentication::AuthenticatorNotSupported
+      when Errors::Authentication::AuthenticatorNotSupported, Errors::Authentication::Security::WebserviceNotFound
         :not_found
       else
         :internal_server_error
@@ -403,11 +419,15 @@ class AuthenticateController < ApplicationController
   end
 
   def installed_authenticators
-    @installed_authenticators ||= Authentication::InstalledAuthenticators.authenticators(ENV)
+    @installed_authenticators ||= Authentication::ImplementedAuthenticators.authenticators(ENV)
   end
 
   def enabled_authenticators
-    Authentication::InstalledAuthenticators.enabled_authenticators
+    DB::Repository::AuthenticatorConfigRepository.new.enabled_authenticators
+  end
+
+  def enabled_authenticators_str
+    DB::Repository::AuthenticatorConfigRepository.new.enabled_authenticators_str
   end
 
   def encoded_response?

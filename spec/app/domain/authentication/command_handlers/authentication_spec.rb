@@ -53,7 +53,7 @@ RSpec.describe(Authentication::CommandHandlers::Authentication) do
 
     context 'when authenticator is not enabled' do
       let(:available_authenticators) do
-        class_double(Authentication::InstalledAuthenticators).tap do |double|
+        double(DB::Repository::AuthenticatorConfigRepository).tap do |double|
           allow(double).to receive(:enabled_authenticators).and_return([])
           allow(double).to receive(:native_authenticators).and_return(['authn'])
         end
@@ -81,12 +81,20 @@ RSpec.describe(Authentication::CommandHandlers::Authentication) do
         end
       end
       let(:available_authenticators) do
-        class_double(Authentication::InstalledAuthenticators).tap do |double|
+        double(DB::Repository::AuthenticatorConfigRepository).tap do |double|
           # rubocop:disable Style/WordArray
-          allow(double).to receive(:enabled_authenticators).and_return(['test-empty', 'test/foo', 'test-with-ttl'])
+          allow(double).to receive(:enabled_authenticators).and_return(['test-empty', 'authn-jwt/foo', 'test/foo', 'test-with-ttl'])
           allow(double).to receive(:native_authenticators).and_return(['test-empty', 'test-with-ttl'])
           # rubocop:enable Style/WordArray
         end
+      end
+      before do
+        allow_any_instance_of(Authentication::AuthnJwt::V2::Strategy)
+          .to receive(:callback).and_return(
+            Responses::Success.new(
+              Authentication::RoleIdentifier.new(identifier: 'rspec:user:foo-bar')
+            )
+          )
       end
       context 'auth token TTL' do
         let(:host_ttl) { 100 }
@@ -163,10 +171,10 @@ RSpec.describe(Authentication::CommandHandlers::Authentication) do
         end
       end
       context 'when authenticator has a webservice' do
-        let(:authenticator_type) { 'test' }
+        let(:authenticator_type) { 'authn-jwt' }
         let(:handler) do
           described_class.new(
-            authenticator_type: 'test',
+            authenticator_type: 'authn-jwt',
             klass_loader_library: klass_loader_class,
             available_authenticators: available_authenticators,
             role_resource: role_resource,
@@ -178,15 +186,39 @@ RSpec.describe(Authentication::CommandHandlers::Authentication) do
 
         let(:authenticator_repository) do
           instance_double(DB::Repository::AuthenticatorRepository).tap do |double|
-            allow(double).to receive(:find).with(type: 'test', account: 'rspec', service_id: 'foo').and_return(SuccessResponse.new({ account: 'rspec', service_id: 'foo' }))
+            allow(double).to receive(:find).with(type: 'authn-jwt', account: 'rspec', service_id: 'foo')
+              .and_return(Responses::Success.new(AuthenticatorsV2::JwtAuthenticatorType.new({ account: 'rspec', service_id: 'foo', variables: {} })))
           end
         end
 
         let(:rbac) do
           instance_double(RBAC::Permission).tap do |double|
-            allow(double).to receive(:permitted?).and_return(SuccessResponse.new(role))
+            allow(double).to receive(:permitted?).and_return(Responses::Success.new(role))
           end
         end
+        context 'When role is not authorized to retrieve authenticator' do
+          let(:authenticator_repository) do
+            instance_double(DB::Repository::AuthenticatorRepository).tap do |double|
+              allow(double).to receive(:find).with(type: 'authn-jwt', account: 'rspec', service_id: 'foo')
+                .and_return(
+                  Responses::Failure.new(
+                    "Authenticator not found",
+                    status: :not_found,
+                    exception: Errors::Authentication::Security::WebserviceNotFound.new('foo')
+                  )
+                )
+            end
+          end
+
+          it 'is unsuccessful' do
+            response = handler.call(**args)
+
+            expect(response.success?).to be(false)
+            expect(response.exception.class).to eq(Errors::Authentication::Security::WebserviceNotFound)
+            expect(response.status).to eq(:unauthorized)
+          end
+        end
+
         context 'when there are no ip address restrictions on the role' do
           it 'is successful' do
             response = handler.call(**args)
@@ -246,7 +278,7 @@ module Authentication
         def initialize(authenticator:); end
 
         def callback(*)
-          SuccessResponse.new(
+          Responses::Success.new(
             Authentication::RoleIdentifier.new(
               identifier: 'rspec:user:foo-bar'
             )
@@ -272,7 +304,7 @@ module Authentication
         def initialize(authenticator:); end
 
         def callback(*)
-          SuccessResponse.new(
+          Responses::Success.new(
             Authentication::RoleIdentifier.new(
               identifier: 'rspec:user:foo-bar'
             )
@@ -299,7 +331,7 @@ module Authentication
         def initialize(authenticator:); end
 
         def callback(*)
-          SuccessResponse.new(
+          Responses::Success.new(
             Authentication::RoleIdentifier.new(
               identifier: 'rspec:user:foo-bar'
             )

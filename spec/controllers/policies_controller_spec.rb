@@ -4,6 +4,7 @@ require 'spec_helper'
 require 'spec_helper_policy'
 require 'parallel'
 
+DatabaseCleaner.allow_remote_database_url = true
 DatabaseCleaner.strategy = :truncation
 
 describe PoliciesController, type: :request do
@@ -22,6 +23,7 @@ describe PoliciesController, type: :request do
     end
 
     after(:all) do
+      # DatabaseCleaner.allow_remote_database_url = true
       DatabaseCleaner.strategy = @original_database_cleaner_strategy
     end
 
@@ -244,9 +246,9 @@ describe PoliciesController, type: :request do
         POLICY
       end
 
-      it "returns error, including advice" do
+      it "returns error, including advice and context" do
         allow(Audit.logger).to receive(:log)
-    
+
         validate_policy(policy: policy_with_missing_colon)
         expect(response.status).to eq(422)
         msg = "could not find expected ':' while scanning a simple key"
@@ -254,6 +256,12 @@ describe PoliciesController, type: :request do
         expect(error_msg_for_validate(response)).to include(msg)
         expect(advice_msg_for_validate(response)).to include(advice)
         expect(Audit.logger).to have_received(:log)
+        
+        # Check for extra error context
+        body = parsed_body(response)
+        context = body.dig('errors', 0, 'context') || {}
+        expect(context['policy_id']).to eq('root')
+        expect(context['offending_lines']).to eq([5])
       end
     end
 
@@ -268,13 +276,38 @@ describe PoliciesController, type: :request do
         POLICY
       end
 
-      it "returns error, including advice" do
+      it "returns error, including advice and context" do
         validate_policy(policy: policy_with_bad_tags)
         expect(response.status).to eq(422)
         msg = "Unrecognized data type '!key1:'"
         advice = "The tag must be one of the following: !delete, !deny, !grant, !group, !host, !host-factory, !layer, !permit, !policy, !revoke, !user, !variable, !webservice"
         expect(error_msg_for_validate(response)).to include(msg)
         # expect(advice_msg_for_validate(response)).to include(advice)
+
+        # Check for extra error context
+        body = parsed_body(response)
+        context = body.dig('errors', 0, 'context') || {}
+        expect(context['policy_id']).to eq('root')
+        expect(context['offending_lines']).to eq([4])
+      end
+    end
+    context 'with a policy containing the include type' do
+      let(:policy_with_include) do
+        <<~POLICY
+          - !include /some/path/policy.yml
+        POLICY
+      end
+
+      it "returns error" do
+        validate_policy(policy: policy_with_include)
+        expect(response.status).to eq(422)
+        msg = "Unrecognized data type '!include'"
+        expect(error_msg_for_validate(response)).to include(msg)
+        body = parsed_body(response)
+        context = body.dig('errors', 0, 'context') || {}
+        expect(context['policy_id']).to eq('root')
+        expect(context['offending_lines']).to eq([1])
+      
       end
     end
   end
@@ -304,6 +337,193 @@ describe PoliciesController, type: :request do
       expect(response).to have_http_status(405)
       expect(response.body).to include('Write operations are not allowed')
       expect(evaluate_policy).not_to have_received(:call).with(Loader::Orchestrate)
+    end
+  end
+
+  context "when policy annotations may conflict with known attributes" do
+    let(:conflicting_yaml) do
+      <<~YAML
+        - !policy
+          id: test
+          annotations:
+            restricted_to: "something"
+      YAML
+    end
+
+    let(:safe_yaml) do
+      <<~YAML
+        - !policy
+          id: test
+          annotations:
+            description: "A safe annotation"
+      YAML
+    end
+
+    let(:multiple_conflicts_yaml) do
+      <<~YAML
+        - !policy
+          id: test
+          annotations:
+            restricted_to: "something"
+            id: "should warn"
+      YAML
+    end
+
+    let(:no_annotations_yaml) do
+      <<~YAML
+        - !policy
+          id: test
+      YAML
+    end
+
+    let(:various_resource_conflicts_yaml) do
+      <<~YAML
+        - !policy
+          id: some-policy
+          annotations:
+            id: "should warn"
+          body:
+            - !group
+              id: some-group
+              annotations:
+                restricted_to: "also should warn"
+            - !host
+              id: some-host
+              annotations:
+                privileges: "also also should warn"
+            - !user
+              id: some-user
+              annotations:
+                member: "also also also should warn"
+            - !variable
+              id: some-variable
+              annotations:
+                owner: "also also also also should warn"
+      YAML
+    end
+
+    let(:mixed_conflicts_yaml) do
+      <<~YAML
+        - !policy
+          id: test-policy
+          body:
+            - !user
+              id: user1
+              annotations:
+                member: "should warn"
+            - !user
+              id: user2
+              annotations:
+                description: "safe"
+            - !variable
+              id: var1
+              annotations:
+                owner: "should warn"
+            - !variable
+              id: var2
+              annotations:
+                something_else: "safe"
+      YAML
+    end
+
+    def request_env(role: 'admin')
+      { 'HTTP_AUTHORIZATION' => access_token_for(role), "Content-Type" => "application/x-yaml" }
+    end
+
+    before(:each) do
+      # Ensure a clean root policy and admin user for each annotation test
+      Slosilo["authn:rspec"] ||= Slosilo::Key.new
+      Role.find_or_create(role_id: 'rspec:user:admin')
+      post "/policies/rspec/policy/root",
+        params: "- !policy\n  id: root\n",
+        env: request_env
+    end
+
+    it "returns a warning when annotation matches a known policy attribute" do
+      post "/policies/rspec/policy/root", params: conflicting_yaml, env: request_env
+      expect(response).to have_http_status(:created).or have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["warnings"]).to include(
+        a_string_matching(/Annotation 'restricted_to' matches a known policy attribute/)
+      )
+    end
+
+    it "loads a policy without annotation conflicts" do
+      post "/policies/rspec/policy/root", params: safe_yaml, env: request_env
+      expect(response).to have_http_status(:created).or have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["warnings"]).to be_nil
+    end
+
+    it "returns warnings for multiple conflicting annotation names" do
+      post "/policies/rspec/policy/root", params: multiple_conflicts_yaml, env: request_env
+      expect(response).to have_http_status(:created).or have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["warnings"]).to include(
+        a_string_matching(/Annotation 'restricted_to'/),
+        a_string_matching(/Annotation 'id'/)
+      )
+    end
+
+    it "loads a policy with no annotations" do
+      post "/policies/rspec/policy/root", params: no_annotations_yaml, env: request_env
+      expect(response).to have_http_status(:created).or have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["warnings"]).to be_nil
+    end
+
+    it "returns warnings for annotation conflicts on various resource types" do
+      post "/policies/rspec/policy/root", params: various_resource_conflicts_yaml, env: request_env
+      expect(response).to have_http_status(:created).or have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["warnings"]).to include(
+        a_string_matching(/Annotation 'id'/),
+        a_string_matching(/Annotation 'restricted_to'/),
+        a_string_matching(/Annotation 'privileges'/),
+        a_string_matching(/Annotation 'member'/),
+        a_string_matching(/Annotation 'owner'/)
+      )
+    end
+
+    it "returns warnings only for resources with conflicting annotation names" do
+      post "/policies/rspec/policy/root", params: mixed_conflicts_yaml, env: request_env
+      expect(response).to have_http_status(:created).or have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["warnings"]).to include(
+        a_string_matching(/Annotation 'member'/),
+        a_string_matching(/Annotation 'owner'/)
+      )
+      expect(body["warnings"].length).to eq(2)
+    end
+  end
+
+  describe '#post', type: :controller do
+    let(:mock_policy) { double('Policy', identifier: 'test-policy') }
+
+    it 'extracts offending_lines from Conjur::PolicyParser::Invalid error' do
+      controller = PoliciesController.new
+      allow(controller).to receive(:resource).and_return(mock_policy)
+      error = Class.new(StandardError) do
+        attr_reader :line
+        def initialize(msg, line)
+          super(msg)
+          @line = line
+        end
+      end.new('Parse error at line', 42)
+      enhanced = controller.send(:enhance_error, error)
+      expect(enhanced).to be_a(Exceptions::EnhancedPolicyError)
+      expect(enhanced.additional_context[:offending_lines]).to eq([42])
+      expect(enhanced.additional_context[:policy_id]).to eq('test-policy')
+    end
+
+    it 'includes policy_id and offending_lines in error context' do
+      controller = PoliciesController.new
+      allow(controller).to receive(:resource).and_return(mock_policy)
+      error = StandardError.new('Test error')
+      enhanced = controller.send(:enhance_error, error)
+      expect(enhanced).to be_a(Exceptions::EnhancedPolicyError)
+      expect(enhanced.additional_context[:policy_id]).to eq('test-policy')
+      expect(enhanced.additional_context[:offending_lines]).to be_an(Array)
     end
   end
 end

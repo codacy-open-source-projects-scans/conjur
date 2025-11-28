@@ -5,6 +5,12 @@ source 'https://rubygems.org'
 # ruby=ruby-3.0
 # ruby-gemset=conjur
 
+plugin 'bundler-override'
+require File.join(
+  Bundler::Plugin.index.load_paths('bundler-override')[0],
+  'bundler-override'
+) rescue nil
+
 # make sure to use tls for github
 git_source(:github) { |name| "https://github.com/#{name}.git" }
 
@@ -12,17 +18,23 @@ git_source(:github) { |name| "https://github.com/#{name}.git" }
 # nicely with RVM and we should be explicit since Ruby is such a fundamental
 # part of a Rails project. The Ruby version is also locked in place by the
 # Docker base image so it won't be updated with fuzzy matching.
+if Bundler::Plugin.installed?('bundler-override')
+  override 'rails', drop: 'activestorage'
+  override 'actionmailbox', drop: 'activestorage'
+  override 'actiontext', drop: 'activestorage'
+end
 
 gem 'base58'
 gem 'command_class'
+gem 'concurrent-ruby', '!= 1.3.5'
 gem 'http', '~> 4.2.0'
 gem 'iso8601'
-gem 'jbuilder', '~> 2.7.0'
 gem 'mustache'
-gem 'nokogiri', '>= 1.8.2'
-gem 'puma', '~> 6', '>= 6.4.2'
-gem 'rack', '~> 2.2', '>= 2.2.8.1'
-gem 'rails', '~> 6.1', '>= 6.1.7.8'
+gem 'net-imap', '>= 0.5.8'
+gem 'nokogiri', '>= 1.18.9'
+gem 'puma', '~> 6', '>= 6.4.3'
+gem 'rack', '>= 2.2.20'
+gem 'rails', '~> 7.2', '>= 7.2.2.2'
 gem 'rake'
 
 gem 'pg'
@@ -31,12 +43,11 @@ gem 'sequel-pg_advisory_locking'
 gem 'sequel-postgres-schemata', require: false
 gem 'sequel-rails'
 
-gem 'activesupport', '~> 6.1', '>= 6.1.4.6'
 gem 'base32-crockford'
 gem 'bcrypt'
 gem 'gli', require: false
 gem 'listen'
-gem 'rexml', '~> 3.3.9'
+gem 'rexml', '~> 3.4.2'
 gem 'slosilo', '~> 3.0'
 
 # Explicitly required as there are vulnerabilities in older versions
@@ -45,7 +56,6 @@ gem "loofah", ">= 2.2.3"
 
 # Pinned to update for role member search, using ref so merging and removing
 # the branch doesn't immediately break this link
-gem 'conjur-api', '~> 5.pre'
 gem 'conjur-policy-parser', path: 'gems/policy-parser'
 gem 'conjur-rack', path: 'gems/conjur-rack'
 gem 'conjur-rack-heartbeat'
@@ -85,11 +95,13 @@ gem 'i18n', '~> 1.8.11'
 gem 'json_schemer'
 gem 'prometheus-client'
 
+# sigdump allows the Conjur server processes to respond to the SIGCONT signal
+# and produce a thread dump of the processes for support and debugging.
+gem 'sigdump', require: 'sigdump/setup'
+
 group :development, :test do
   gem 'aruba'
   gem 'ci_reporter_rspec'
-  gem 'conjur-cli', '~> 6.2'
-  gem 'conjur-debify', require: false
   gem 'csr'
   gem 'cucumber', '~> 7.1'
   gem 'database_cleaner', '~> 1.8'
@@ -120,16 +132,16 @@ group :development, :test do
   gem 'spring-commands-rspec'
   gem 'table_print'
   gem 'vcr'
-  gem 'webmock'
+  gem 'webmock', '>= 3.19.0'
   gem 'webrick'
 end
 
 group :development do
   # NOTE: minor version of this needs to match codeclimate channel
-  gem 'rubocop', '>= 1.4.0', require: false
+  gem 'rubocop', '>= 1.57.0', require: false
 
   gem 'reek', require: false
-  gem 'rubocop-checkstyle_formatter', require: false # for Jenkins
+  gem 'rubocop-checkstyle_formatter', '>= 0.5.0', require: false # for Jenkins
 end
 
 group :test do

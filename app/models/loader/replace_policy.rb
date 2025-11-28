@@ -10,15 +10,15 @@ module Loader
 
     def initialize(
       loader:,
-      policy_diff: CommandHandler::PolicyDiff.new,
-      policy_repository: DB::Repository::PolicyRepository.new,
+      current_user:,
       policy_result: ::PolicyResult,
+      resource: ::Resource,
       logger: Rails.logger
     )
       @loader = loader
-      @policy_diff = policy_diff
-      @policy_repository = policy_repository
+      @current_user = current_user
       @policy_result = policy_result
+      @resource = resource
       @logger = logger
     end
 
@@ -26,9 +26,9 @@ module Loader
       policy_parse,
       policy_version,
       production_class,
-      policy_diff: CommandHandler::PolicyDiff.new,
-      policy_repository: DB::Repository::PolicyRepository.new,
+      current_user,
       policy_result: ::PolicyResult,
+      resource: ::Resource,
       logger: Rails.logger
     )
       ReplacePolicy.new(
@@ -37,9 +37,9 @@ module Loader
           policy_version: policy_version,
           logger: logger
         ),
-        policy_diff: policy_diff,
-        policy_repository: policy_repository,
         policy_result: policy_result,
+        current_user: current_user,
+        resource: resource,
         logger: logger
       )
     end
@@ -48,44 +48,21 @@ module Loader
       result = call
       policy_result.created_roles = (result.created_roles)
       policy_result.diff = (result.diff)
+      policy_result.visible_resources_before = (result.visible_resources_before)
+      policy_result.visible_resources_after = (result.visible_resources_after)
     end
 
     # Call sequence that will perform the 'policy replace'
     def call
-      # TODO: A refactor is pending for CNJR-6965 to improve testability of the
-      # policy loading process. See app/models/loader/create_policy.rb.
-      if @loader.diff_schema_name
-        @policy_repository.setup_schema_for_dryrun_diff(
-          diff_schema_name: @loader.diff_schema_name
-        )
-      end
-
-      @loader.setup_db_for_new_policy
-      @loader.delete_removed
-      @loader.delete_shadowed_and_duplicate_rows
-      @loader.upsert_policy_records
-      @loader.clean_db
-      @loader.store_auxiliary_data
-
-      diff = if @loader.diff_schema_name
-        @policy_diff.call(
-          diff_schema_name: @loader.diff_schema_name
-        ).result
-      end
-
-      # Destroy the temp schema used for diffing
-      if @loader.diff_schema_name
-        @policy_repository.drop_diff_schema_for_dryrun(
-          diff_schema_name: @loader.diff_schema_name
-        )
-      end
-      @loader.release_db_connection
+      @loader.replace_policy(current_user: @current_user)
 
       @policy_result.new(
         policy_parse: @loader.policy_parse,
         policy_version: @loader.policy_version,
         created_roles: credential_roles,
-        diff: diff
+        diff: @loader.diff,
+        visible_resources_before: @loader.visible_resource_hash_before,
+        visible_resources_after: @loader.visible_resource_hash_after
       )
     end
 

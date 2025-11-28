@@ -198,3 +198,13 @@ Feature: Adding and fetching secrets
     """
     When I GET "/secrets/cucumber/variable/probe?version=1"
     Then the HTTP response status code is 404
+
+  @negative @acceptance
+  Scenario: Creating a secret value with kind group is not allowed.
+    Given I save my place in the audit log file for remote
+    And I create a new "group" resource called "test-group"
+    When I POST "/secrets/cucumber/group/test-group" with body:
+    """
+    value
+    """
+    Then the HTTP response status code is 404

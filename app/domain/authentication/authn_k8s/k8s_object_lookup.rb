@@ -24,11 +24,11 @@ module Authentication
         @webservice = webservice
         @cert_store = OpenSSL::X509::Store.new
         @cert_store.set_default_paths
-        ::Conjur::CertUtils.add_chained_cert(@cert_store, ca_cert)
+        Conjur::Certificates::CertUtils.add_chained_cert(@cert_store, ca_cert)
 
         return unless ENV.key?('SSL_CERT_DIRECTORY')
 
-        ::Conjur::CertUtils.load_certificates(
+        Conjur::Certificates::CertUtils.load_certificates(
           @cert_store,
           File.join(ENV['SSL_CERT_DIRECTORY'], 'ca')
         )
@@ -74,8 +74,12 @@ module Authentication
         if host.present? && port.present?
           "https://#{host}:#{port}"
         else
-          @webservice.variable(VARIABLE_API_URL).secret.value
+          variable_api_url
         end
+      end
+
+      def variable_api_url
+        @variable_api_url ||= @webservice.variable(VARIABLE_API_URL).secret.value
       end
 
       # Gets the client object to the /api v1 endpoint.

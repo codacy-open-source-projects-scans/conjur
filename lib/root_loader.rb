@@ -1,11 +1,6 @@
 # frozen_string_literal: true
 
 require 'json'
-require 'logs'
-require 'app/db/repository/policy_repository'
-require 'app/domain/responses'
-require 'app/models/loader/orchestrate'
-require 'app/domain/logs'
 
 # BootstrapLoader is used to load an initial "root" policy when the database is completely empty.
 class RootLoader
@@ -34,7 +29,7 @@ class RootLoader
           filename: filename
         )
 
-        acc_roles = accepted_roles(policy)
+        acc_roles = accepted_roles(policy, admin)
         created_roles = create_roles(acc_roles)
 
         $stderr.puts(
@@ -63,11 +58,12 @@ class RootLoader
       end
     end
 
-    def accepted_roles(policy_version)
+    def accepted_roles(policy_version, current_user)
       policy_action = Loader::ReplacePolicy.from_policy(
         policy_version.policy_parse,
         policy_version,
-        Loader::Orchestrate
+        Loader::Orchestrate,
+        current_user
       )
       policy_action.call
       policy_action.new_roles.select do |role|

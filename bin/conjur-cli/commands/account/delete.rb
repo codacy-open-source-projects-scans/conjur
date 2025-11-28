@@ -6,7 +6,7 @@ require_relative '../connect_database'
 
 module Commands
   module Account
-    Delete ||= CommandClass.new(
+    Delete = CommandClass.new(
       dependencies: {
         connect_database: ConnectDatabase.new
       },
@@ -21,7 +21,7 @@ module Commands
         # Ensure the database is available
         @connect_database.call
 
-        exec("rake 'account:delete[#{@account}]'")
+        Kernel.system("rake", "account:delete[#{@account}]")
       end
     end
   end

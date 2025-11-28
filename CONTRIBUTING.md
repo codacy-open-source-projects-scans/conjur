@@ -107,7 +107,7 @@ To use it:
    ```
 
    Once the `start` script finishes, you're in a Bash shell inside the Conjur
-   server container.  To
+   server container.
 
    After starting Conjur, your instance will be configured with the following:
    * Account: `cucumber`
@@ -320,7 +320,7 @@ Randomized with seed 62317
 .............................................
 
 Finished in 3.84 seconds (files took 3.33 seconds to load)
-45 examples, 0 failures
+2252 examples, 0 failures, 3 pending
 ```
 
 ### Cucumber

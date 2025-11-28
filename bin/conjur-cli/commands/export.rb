@@ -5,7 +5,7 @@ require 'command_class'
 require_relative './connect_database'
 
 module Commands
-  Export ||= CommandClass.new(
+  Export = CommandClass.new(
     dependencies: {
       connect_database: ConnectDatabase.new
     },
@@ -19,7 +19,7 @@ module Commands
       # Ensure the database is available
       @connect_database.call
 
-      exec(%Q(rake export["#{@out_dir}","#{@label}"]))
+      Kernel.system("rake", "export[#{@out_dir},#{@label}]")
     end
   end
 end
